@@ -137,4 +137,4 @@ We welcome contributions! Please see our [CONTRIBUTING.md](CONTRIBUTING.md) for 
 
 ## License
 
-[MIT License](LICENSE) (Replace with your actual license)
+[MIT License](LICENSE)
