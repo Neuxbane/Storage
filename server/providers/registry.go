@@ -25,6 +25,10 @@ func CreateProvider(pType string, cfg map[string]string) (interface{}, error) {
 		return NewTelegramProviderFromConfig(cfg)
 	case "filebin":
 		return NewFilebinProviderFromConfig(cfg)
+	case "ssh":
+		return NewSSHProviderFromConfig(cfg)
+	case "ftp":
+		return NewFTPProviderFromConfig(cfg)
 	default:
 		return nil, fmt.Errorf("unknown provider type: %s", pType)
 	}

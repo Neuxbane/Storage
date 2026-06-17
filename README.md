@@ -1,6 +1,8 @@
 # MultiStorage
 
-MultiStorage is a sophisticated distributed storage system written in Go that transforms messaging platforms and web services into redundant, reliable storage backends. By splitting files into chunks and replicating them across multiple providers (like Discord, Telegram, and Filebin), MultiStorage ensures your data remains available even if individual services go down or impose limits.
+MultiStorage is a highly modular distributed storage system that treats any service as a potential storage layer. Its architecture is built around dynamic providers, allowing it to transform messaging platforms, web services, and remote servers into a unified, redundant, and reliable storage backend.
+
+By splitting files into chunks and replicating them across an adaptable ecosystem of providers—ranging from Discord and Telegram to SSH and FTP—MultiStorage ensures your data remains available and resilient. The entire system is presented through a FUSE interface, letting you interact with this distributed network as a standard local filesystem.
 
 ## How it Works
 
@@ -67,6 +69,24 @@ The server requires a `config.json` file. Here is an example showing how to conf
         "token": "YOUR_BOT_TOKEN",
         "chat_id": "YOUR_CHAT_ID"
       }
+    },
+    {
+      "ssh": {
+        "name": "SSH-Server",
+        "host": "example.com:22",
+        "user": "username",
+        "password": "password",
+        "path": "/path/to/storage"
+      }
+    },
+    {
+      "ftp": {
+        "name": "FTP-Server",
+        "host": "ftp.example.com:21",
+        "user": "username",
+        "password": "password",
+        "path": "/path/to/storage"
+      }
     }
   ]
 }
@@ -102,6 +122,8 @@ Now you can access your files at `./my-storage`!
 - **Discord**: Uses channel messages to store binary chunks. Requires a Bot Token and Channel ID.
 - **Telegram**: Uses bot API to store chunks as documents. Requires a Bot Token and Chat ID.
 - **Filebin**: Anonymized file hosting for temporary or test storage.
+- **SSH (SFTP)**: Securely stores chunks on a remote server via SFTP.
+- **FTP**: Stores chunks on a remote server via traditional FTP.
 
 ## Project Structure
 
