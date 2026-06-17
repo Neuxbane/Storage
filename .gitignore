@@ -1,4 +1,5 @@
 cache/*
 *.db
-mnt/*
+mnt
+cache
 *.json
