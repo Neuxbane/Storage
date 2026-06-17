@@ -4,6 +4,11 @@ MultiStorage is a highly modular distributed storage system that treats any serv
 
 By splitting files into chunks and replicating them across an adaptable ecosystem of providers—ranging from Discord and Telegram to SSH and FTP—MultiStorage ensures your data remains available and resilient. The entire system is presented through a FUSE interface, letting you interact with this distributed network as a standard local filesystem.
 
+### Known Issues
+
+- **Rename Latency**: When renaming files or directories, there is currently a delay before the operating system reflects the change and refreshes the content.
+- **Copy/Paste Overhead**: Even if a file's data hash is identical to one already stored, copying and pasting within the filesystem is not yet instantaneous, as the system does not currently perform server-side deduplication during local FUSE operations.
+
 ## How it Works
 
 MultiStorage operates on a Client-Server architecture:
