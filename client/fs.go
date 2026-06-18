@@ -22,12 +22,13 @@ func (f *FS) Root() (fs.Node, error) {
 
 func (f *FS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.StatfsResponse) error {
 	resp.Bsize = 4096
+	resp.Frsize = 4096
 
-	// Client-side hardcoded estimated capacity representation (1 Quettabyte, capped at FUSE's maximum system limit of ~18.4 Exabytes)
-	const infiniteSize = ^uint64(0)
-	resp.Blocks = infiniteSize / uint64(resp.Bsize)
-	resp.Bfree = infiniteSize / uint64(resp.Bsize)
-	resp.Bavail = resp.Bfree
+	// Client-side hardcoded capacity representation of 4 EiB
+	const capacityBytes = uint64(4) << 60
+	resp.Blocks = capacityBytes / uint64(resp.Bsize)
+	resp.Bfree = resp.Blocks
+	resp.Bavail = resp.Blocks
 	resp.Files = 1 << 32
 	resp.Ffree = resp.Files
 	return nil
@@ -192,6 +193,11 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	handle := &FileHandle{
 		Name: fullPath,
 	}
+
+	resp.Attr.Mode = req.Mode
+	resp.Attr.Size = 0
+	resp.Attr.Uid = req.Uid
+	resp.Attr.Gid = req.Gid
 
 	return &File{Name: fullPath, Meta: meta}, handle, nil
 }

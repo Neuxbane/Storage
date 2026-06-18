@@ -243,6 +243,9 @@ func handleConnection(conn *websocket.Conn, serverPassword string) {
 						cleanUpNodeChunksServer(removeReq.Path, meta)
 					}
 					respErr = db.Delete(removeReq.Path)
+					if respErr == nil {
+						log.Printf("[Server] Successfully deleted: %s", removeReq.Path)
+					}
 				}
 			}
 

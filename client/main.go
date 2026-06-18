@@ -52,15 +52,84 @@ func safeUnmount(mountpoint string) {
 // =========================================================================
 
 type WSClient struct {
-	conn    *websocket.Conn
-	mu      sync.Mutex
-	chans   map[string]chan WSResponse
-	writeMu sync.Mutex
+	conn      *websocket.Conn
+	mu        sync.Mutex
+	chans     map[string]chan WSResponse
+	writeMu   sync.Mutex
+	wsURL     string
+	password  string
+	connected bool
+	cond      *sync.Cond
+	queue     *OperationQueue
 }
 
 var wsClient *WSClient
 
+func isModifying(reqType string) bool {
+	switch reqType {
+	case "create_node", "remove_node", "rename_node", "write_file", "flush_file", "set_attr":
+		return true
+	}
+	return false
+}
+
+func (c *WSClient) waitConnected() {
+	c.mu.Lock()
+	for !c.connected {
+		c.cond.Wait()
+	}
+	c.mu.Unlock()
+}
+
 func (c *WSClient) Request(reqType string, payload interface{}) (json.RawMessage, error) {
+	if isModifying(reqType) {
+		c.mu.Lock()
+		if !c.connected || len(c.queue.ops) > 0 {
+			c.mu.Unlock()
+			resChan := c.queue.Add(reqType, payload)
+			err := <-resChan
+			return nil, err
+		}
+		c.mu.Unlock()
+	} else {
+		c.mu.Lock()
+		online := c.connected
+		c.mu.Unlock()
+		if !online {
+			if reqType == "get_attr" {
+				req, ok := payload.(GetAttrRequest)
+				if ok {
+					if meta, exists, found := c.queue.FindQueuedMeta(req.Path); found {
+						if !exists {
+							return nil, fuse.ENOENT
+						}
+						b, _ := json.Marshal(meta)
+						return b, nil
+					}
+				}
+			} else if reqType == "read_dir" {
+				req, ok := payload.(ReadDirRequest)
+				if ok {
+					if entries, found := c.queue.FindQueuedDirEntries(req.Path); found {
+						resp := ReadDirResponse{Entries: entries}
+						b, _ := json.Marshal(resp)
+						return b, nil
+					}
+				}
+			}
+			c.waitConnected()
+		}
+	}
+
+	return c.requestDirect(reqType, payload)
+}
+
+func (c *WSClient) RequestBinary(reqType string, payload interface{}) ([]byte, error) {
+	c.waitConnected()
+	return c.requestBinaryDirect(reqType, payload)
+}
+
+func (c *WSClient) requestDirect(reqType string, payload interface{}) (json.RawMessage, error) {
 	c.mu.Lock()
 	if c.chans == nil {
 		c.chans = make(map[string]chan WSResponse)
@@ -81,7 +150,13 @@ func (c *WSClient) Request(reqType string, payload interface{}) (json.RawMessage
 	b, _ := json.Marshal(req)
 	
 	c.writeMu.Lock()
-	err := c.conn.WriteMessage(websocket.TextMessage, b)
+	conn := c.conn
+	var err error
+	if conn != nil {
+		err = conn.WriteMessage(websocket.TextMessage, b)
+	} else {
+		err = fmt.Errorf("connection closed")
+	}
 	c.writeMu.Unlock()
 
 	if err != nil {
@@ -91,7 +166,10 @@ func (c *WSClient) Request(reqType string, payload interface{}) (json.RawMessage
 		return nil, err
 	}
 
-	resp := <-ch
+	resp, ok := <-ch
+	if !ok {
+		return nil, fmt.Errorf("connection closed")
+	}
 
 	c.mu.Lock()
 	delete(c.chans, id)
@@ -107,7 +185,7 @@ func (c *WSClient) Request(reqType string, payload interface{}) (json.RawMessage
 	return resp.Payload, nil
 }
 
-func (c *WSClient) RequestBinary(reqType string, payload interface{}) ([]byte, error) {
+func (c *WSClient) requestBinaryDirect(reqType string, payload interface{}) ([]byte, error) {
 	c.mu.Lock()
 	if c.chans == nil {
 		c.chans = make(map[string]chan WSResponse)
@@ -128,7 +206,13 @@ func (c *WSClient) RequestBinary(reqType string, payload interface{}) ([]byte, e
 	b, _ := json.Marshal(req)
 	
 	c.writeMu.Lock()
-	err := c.conn.WriteMessage(websocket.TextMessage, b)
+	conn := c.conn
+	var err error
+	if conn != nil {
+		err = conn.WriteMessage(websocket.TextMessage, b)
+	} else {
+		err = fmt.Errorf("connection closed")
+	}
 	c.writeMu.Unlock()
 
 	if err != nil {
@@ -138,7 +222,10 @@ func (c *WSClient) RequestBinary(reqType string, payload interface{}) ([]byte, e
 		return nil, err
 	}
 
-	resp := <-ch
+	resp, ok := <-ch
+	if !ok {
+		return nil, fmt.Errorf("connection closed")
+	}
 
 	c.mu.Lock()
 	delete(c.chans, id)
@@ -156,11 +243,33 @@ func (c *WSClient) RequestBinary(reqType string, payload interface{}) ([]byte, e
 
 func (c *WSClient) Listen() {
 	for {
-		messageType, payload, err := c.conn.ReadMessage()
+		c.mu.Lock()
+		for !c.connected {
+			c.cond.Wait()
+		}
+		conn := c.conn
+		c.mu.Unlock()
+
+		if conn == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("[Client] Read error: %v. Reconnect required.", err)
-			break
+			c.mu.Lock()
+			if c.connected {
+				c.connected = false
+				for id, ch := range c.chans {
+					ch <- WSResponse{ID: id, Error: "connection closed"}
+				}
+				c.chans = make(map[string]chan WSResponse)
+			}
+			c.mu.Unlock()
+			continue
 		}
+
 		var resp WSResponse
 		if messageType == websocket.BinaryMessage {
 			if len(payload) < 33 {
@@ -179,12 +288,107 @@ func (c *WSClient) Listen() {
 				continue
 			}
 		}
+
 		c.mu.Lock()
 		ch, exists := c.chans[resp.ID]
 		c.mu.Unlock()
 		if exists {
 			ch <- resp
 		}
+	}
+}
+
+func (c *WSClient) reconnectLoop() {
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 5 * time.Second,
+		ReadBufferSize:   4 * 1024 * 1024,
+		WriteBufferSize:  4 * 1024 * 1024,
+	}
+
+	for {
+		c.mu.Lock()
+		connected := c.connected
+		c.mu.Unlock()
+
+		if !connected {
+			log.Printf("[Client] Attempting to connect to backend at %s...", c.wsURL)
+			conn, _, err := dialer.Dial(c.wsURL, nil)
+			if err != nil {
+				log.Printf("[Client] Connection failed: %v. Retrying in 2 seconds...", err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			c.mu.Lock()
+			c.conn = conn
+			c.connected = true
+			c.cond.Broadcast()
+			c.mu.Unlock()
+
+			log.Printf("[Client] Connected to backend. Authenticating...")
+			_, err = c.requestDirect("auth", AuthRequest{Password: c.password})
+			if err != nil {
+				log.Printf("[Client] Authentication failed: %v. Retrying in 2 seconds...", err)
+				c.mu.Lock()
+				c.connected = false
+				c.conn = nil
+				conn.Close()
+				c.mu.Unlock()
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			log.Printf("[Client] Authentication successful! Replaying queue...")
+
+			success := true
+			for {
+				c.queue.mu.Lock()
+				if len(c.queue.ops) == 0 {
+					c.queue.mu.Unlock()
+					break
+				}
+				op := c.queue.ops[0]
+				c.queue.ops = c.queue.ops[1:]
+				c.queue.mu.Unlock()
+
+				log.Printf("[Client] Replaying queued action: %s", op.Type)
+				_, err = c.requestDirect(op.Type, op.Payload)
+				if err != nil {
+					log.Printf("[Client] Replay failed for operation %s: %v", op.Type, err)
+					isConnErr := false
+					errStr := err.Error()
+					if strings.Contains(errStr, "connection closed") || strings.Contains(errStr, "close") || strings.Contains(errStr, "broken pipe") || strings.Contains(errStr, "EOF") {
+						isConnErr = true
+					}
+					if isConnErr {
+						c.queue.mu.Lock()
+						c.queue.ops = append([]*QueuedOp{op}, c.queue.ops...)
+						c.queue.mu.Unlock()
+						success = false
+						break
+					} else {
+						op.ResultChan <- err
+					}
+				} else {
+					op.ResultChan <- nil
+				}
+			}
+
+			if !success {
+				log.Printf("[Client] Replay failed/interrupted. Retrying...")
+				c.mu.Lock()
+				c.connected = false
+				c.conn = nil
+				conn.Close()
+				c.mu.Unlock()
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			log.Printf("[Client] Queue replayed successfully. Client is online.")
+		}
+
+		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -206,30 +410,16 @@ func main() {
 	password, _ := reader.ReadString('\n')
 	password = strings.TrimSpace(password)
 
-	log.Printf("[Client] Connecting to backend at %s...", wsURL)
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 5 * time.Second,
-		ReadBufferSize:   4 * 1024 * 1024,
-		WriteBufferSize:  4 * 1024 * 1024,
-	}
-	conn, _, err := dialer.Dial(wsURL, nil)
-	if err != nil {
-		log.Fatalf("Failed to connect to backend: %v", err)
-	}
-
 	wsClient = &WSClient{
-		conn:  conn,
-		chans: make(map[string]chan WSResponse),
+		wsURL:    wsURL,
+		password: password,
+		chans:    make(map[string]chan WSResponse),
+		queue:    NewOperationQueue(),
 	}
-	go wsClient.Listen()
+	wsClient.cond = sync.NewCond(&wsClient.mu)
 
-	// Authenticate
-	log.Printf("[Client] Authenticating...")
-	_, err = wsClient.Request("auth", AuthRequest{Password: password})
-	if err != nil {
-		log.Fatalf("Authentication failed: %v", err)
-	}
-	log.Printf("[Client] Authentication successful!")
+	go wsClient.Listen()
+	go wsClient.reconnectLoop()
 
 	// Lightweight local FUSE client config
 	mountpoint := "mnt"

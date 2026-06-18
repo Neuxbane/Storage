@@ -203,6 +203,11 @@ func (d *ServerDir) Create(ctx context.Context, req *fuse.CreateRequest, resp *f
 		Name: fullPath,
 	}
 
+	resp.Attr.Mode = req.Mode
+	resp.Attr.Size = 0
+	resp.Attr.Uid = req.Uid
+	resp.Attr.Gid = req.Gid
+
 	return &ServerFile{Name: fullPath, Meta: meta}, handle, nil
 }
 
