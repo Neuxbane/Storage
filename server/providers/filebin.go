@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,8 +65,38 @@ func NewFilebinProvider(name string) (*FilebinProvider, error) {
 			Jar:     jar,
 		},
 	}
-	// Init base provider with 5 concurrency slots and 1s cooldown
 	p.Init(name, 5, 1*time.Second)
+
+	// Load state if GlobalStateStore is available
+	if GlobalStateStore != nil {
+		hasPersistedState := false
+		if binID, err := GlobalStateStore.GetState(name, "bin_id"); err == nil && binID != "" {
+			p.currentBinID = binID
+			hasPersistedState = true
+			log.Printf("[Filebin %s] Loaded persisted bin ID: %s", name, binID)
+		}
+		if createdAtStr, err := GlobalStateStore.GetState(name, "bin_created_at"); err == nil && createdAtStr != "" {
+			if t, errParse := time.Parse(time.RFC3339, createdAtStr); errParse == nil {
+				p.binCreatedAt = t
+				log.Printf("[Filebin %s] Loaded persisted bin created time: %v", name, t)
+			}
+		}
+		if cookiesJSON, err := GlobalStateStore.GetState(name, "cookies"); err == nil && cookiesJSON != "" {
+			var cookies []*http.Cookie
+			if errUnmarshal := json.Unmarshal([]byte(cookiesJSON), &cookies); errUnmarshal == nil {
+				u, _ := url.Parse("https://filebin.net")
+				p.client.Jar.SetCookies(u, cookies)
+				log.Printf("[Filebin %s] Loaded %d persisted cookies", name, len(cookies))
+			}
+		}
+
+		if !hasPersistedState {
+			// Save the initial state since we generated a fresh bin ID
+			_ = GlobalStateStore.SetState(name, "bin_id", p.currentBinID)
+			_ = GlobalStateStore.SetState(name, "bin_created_at", p.binCreatedAt.Format(time.RFC3339))
+		}
+	}
+
 	log.Printf("[Filebin] Initialized provider %s with bin ID: %s", name, p.currentBinID)
 	return p, nil
 }
@@ -100,6 +132,11 @@ func (p *FilebinProvider) getOrRotateBin() string {
 		p.currentBinID = generateBinID()
 		p.binCreatedAt = time.Now()
 		log.Printf("[Filebin] Rotated bin ID for %s: %s -> %s", p.Name(), oldBin, p.currentBinID)
+
+		if GlobalStateStore != nil {
+			_ = GlobalStateStore.SetState(p.Name(), "bin_id", p.currentBinID)
+			_ = GlobalStateStore.SetState(p.Name(), "bin_created_at", p.binCreatedAt.Format(time.RFC3339))
+		}
 	}
 	return p.currentBinID
 }
@@ -153,13 +190,13 @@ func (p *FilebinProvider) Download(ctx context.Context, metadata map[string]inte
 	}
 
 	return p.ProcessDownload(ctx, chunkHash, func() ([]byte, error) {
-		url := fmt.Sprintf("https://filebin.net/%s/%s", binID, chunkHash)
+		targetURL := fmt.Sprintf("https://filebin.net/%s/%s", binID, chunkHash)
 		log.Printf("[Filebin %s] Downloading chunk %s from bin %s...", p.Name(), chunkHash[:8], binID)
 
 		downloadCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 
-		req, err := http.NewRequestWithContext(downloadCtx, "GET", url, nil)
+		req, err := http.NewRequestWithContext(downloadCtx, "GET", targetURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -203,7 +240,7 @@ func (p *FilebinProvider) Download(ctx context.Context, metadata map[string]inte
 				retryCtx, retryCancel := context.WithTimeout(ctx, 60*time.Second)
 				defer retryCancel()
 
-				retryReq, err := http.NewRequestWithContext(retryCtx, "GET", url, nil)
+				retryReq, err := http.NewRequestWithContext(retryCtx, "GET", targetURL, nil)
 				if err != nil {
 					return nil, err
 				}
@@ -219,6 +256,15 @@ func (p *FilebinProvider) Download(ctx context.Context, metadata map[string]inte
 
 				if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 					return nil, fmt.Errorf("download failed after retry with status %s", resp.Status)
+				}
+
+				if GlobalStateStore != nil {
+					u, _ := url.Parse("https://filebin.net")
+					cookies := p.client.Jar.Cookies(u)
+					if b, errMarshal := json.Marshal(cookies); errMarshal == nil {
+						_ = GlobalStateStore.SetState(p.Name(), "cookies", string(b))
+						log.Printf("[Filebin %s] Persisted %d bypass cookies to DB", p.Name(), len(cookies))
+					}
 				}
 
 				// Double check to ensure we didn't receive the HTML disclaimer page again

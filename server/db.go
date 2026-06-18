@@ -227,6 +227,16 @@ func NewJSONDB(sqlDB *sql.DB, chunksDB *ChunksDB) (*JSONDB, error) {
 		}
 	}
 
+	_, err = sqlDB.Exec(`CREATE TABLE IF NOT EXISTS provider_state (
+		provider_id TEXT NOT NULL,
+		key TEXT NOT NULL,
+		value TEXT NOT NULL,
+		PRIMARY KEY (provider_id, key)
+	);`)
+	if err != nil {
+		return nil, err
+	}
+
 	return &JSONDB{sqlDB: sqlDB}, nil
 }
 
@@ -518,6 +528,24 @@ func (db *JSONDB) Rename(oldPath, newPath string) error {
 	}
 
 	_, err = db.sqlDB.Exec("UPDATE nodes SET name = ?, parent_id = ? WHERE id = ?", newName, parentArg, id)
+	return err
+}
+
+func (db *JSONDB) GetState(providerID, key string) (string, error) {
+	var val string
+	err := db.sqlDB.QueryRow("SELECT value FROM provider_state WHERE provider_id = ? AND key = ?", providerID, key).Scan(&val)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return val, err
+}
+
+func (db *JSONDB) SetState(providerID, key, value string) error {
+	_, err := db.sqlDB.Exec(`
+		INSERT INTO provider_state (provider_id, key, value) 
+		VALUES (?, ?, ?) 
+		ON CONFLICT(provider_id, key) DO UPDATE SET value = excluded.value;`,
+		providerID, key, value)
 	return err
 }
 

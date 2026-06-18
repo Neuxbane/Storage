@@ -10,6 +10,8 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"multistorage/server/providers"
 )
 
 // =========================================================================
@@ -47,6 +49,7 @@ func main() {
 		log.Fatalf("Failed to initialize KV db: %v", err)
 	}
 	
+	providers.GlobalStateStore = db.(*JSONDB)
 	loadProviders()
 
 	// Queue any replication tasks left in progress

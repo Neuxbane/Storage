@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+type StateStore interface {
+	GetState(providerID, key string) (string, error)
+	SetState(providerID, key, value string) error
+}
+
+var GlobalStateStore StateStore
+
 type RateLimitError struct {
 	RetryAfter time.Duration
 	Message    string
