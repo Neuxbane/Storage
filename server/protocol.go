@@ -84,3 +84,29 @@ type WriteFileRequest struct {
 type FlushFileRequest struct {
 	Path string `json:"path"`
 }
+
+type GetChunkSizeResponse struct {
+	ChunkSize int64 `json:"chunk_size"`
+}
+
+type CheckChunksRequest struct {
+	Hashes []string `json:"hashes"`
+}
+
+type CheckChunksResponse struct {
+	Missing []string `json:"missing"`
+}
+
+type UploadChunkRequest struct {
+	Hash string `json:"hash"`
+	Data string `json:"data"` // base64 encoded
+}
+
+type CommitFileRequest struct {
+	Path    string   `json:"path"`
+	Size    uint64   `json:"size"`
+	Mode    uint32   `json:"mode"`
+	Uid     uint32   `json:"uid"`
+	Gid     uint32   `json:"gid"`
+	Sources []string `json:"sources"`
+}

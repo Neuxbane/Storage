@@ -61,6 +61,7 @@ type WSClient struct {
 	connected bool
 	cond      *sync.Cond
 	queue     *OperationQueue
+	chunkSize int64
 }
 
 var wsClient *WSClient
@@ -383,6 +384,16 @@ func (c *WSClient) reconnectLoop() {
 				c.mu.Unlock()
 				time.Sleep(2 * time.Second)
 				continue
+			}
+
+			// Fetch chunk size from server
+			chunkSizePayload, errChunk := c.requestDirect("get_chunk_size", nil)
+			if errChunk == nil {
+				var chunkResp GetChunkSizeResponse
+				if json.Unmarshal(chunkSizePayload, &chunkResp) == nil {
+					c.chunkSize = chunkResp.ChunkSize
+					log.Printf("[Client] Chunk size configured from server: %d bytes", c.chunkSize)
+				}
 			}
 
 			log.Printf("[Client] Queue replayed successfully. Client is online.")

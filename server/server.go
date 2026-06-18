@@ -335,6 +335,93 @@ func handleConnection(conn *websocket.Conn, serverPassword string) {
 				respErr = flushFile(flushReq.Path)
 			}
 
+		case "get_chunk_size":
+			respPayload = GetChunkSizeResponse{ChunkSize: DefaultChunkSize}
+
+		case "check_chunks":
+			var checkReq CheckChunksRequest
+			if err := json.Unmarshal(req.Payload, &checkReq); err != nil {
+				respErr = err
+			} else {
+				var missing []string
+				for _, h := range checkReq.Hashes {
+					_, err := chunksDB.Get(h)
+					if err != nil { // missing
+						missing = append(missing, h)
+					}
+				}
+				respPayload = CheckChunksResponse{Missing: missing}
+			}
+
+		case "upload_chunk":
+			var uploadReq UploadChunkRequest
+			if err := json.Unmarshal(req.Payload, &uploadReq); err != nil {
+				respErr = err
+			} else {
+				decoded, err := base64.StdEncoding.DecodeString(uploadReq.Data)
+				if err != nil {
+					respErr = err
+				} else {
+					existingChunk, errChunk := chunksDB.Get(uploadReq.Hash)
+					if errChunk != nil {
+						existingChunk = ChunkMeta{
+							Hash:        uploadReq.Hash,
+							Size:        int64(len(decoded)),
+							Replicas:    make(map[string]map[string]interface{}),
+							LastChecked: make(map[string]time.Time),
+							Status:      "replicating",
+						}
+						_ = chunksDB.Put(uploadReq.Hash, existingChunk)
+					}
+					evictCacheIfNecessary(int64(len(decoded)))
+					cachePath := filepath.Join("./cache", uploadReq.Hash)
+					_ = os.WriteFile(cachePath, decoded, 0644)
+
+					requiredReplication := getReplicationFactor()
+					if len(existingChunk.Replicas) < requiredReplication {
+						globalReplicationQueue.Push(ReplicationTask{
+							ChunkHash: uploadReq.Hash,
+							ChunkSize: int64(len(decoded)),
+							AddedAt:   time.Now(),
+						})
+					}
+				}
+			}
+
+		case "commit_file":
+			var commitReq CommitFileRequest
+			if err := json.Unmarshal(req.Payload, &commitReq); err != nil {
+				respErr = err
+			} else {
+				meta, err := db.Get(commitReq.Path)
+				if err == nil {
+					oldSources := meta.Sources
+					meta.Size = commitReq.Size
+					meta.Mode = commitReq.Mode
+					meta.Uid = commitReq.Uid
+					meta.Gid = commitReq.Gid
+					meta.Sources = commitReq.Sources
+
+					if errPut := db.Put(commitReq.Path, meta); errPut == nil {
+						cleanUpOrphanedHashesServer(oldSources, commitReq.Sources, commitReq.Path)
+					} else {
+						respErr = errPut
+					}
+				} else if err == fuse.ENOENT {
+					meta = NodeMeta{
+						Type:    "file",
+						Mode:    commitReq.Mode,
+						Size:    commitReq.Size,
+						Uid:     commitReq.Uid,
+						Gid:     commitReq.Gid,
+						Sources: commitReq.Sources,
+					}
+					respErr = db.Put(commitReq.Path, meta)
+				} else {
+					respErr = err
+				}
+			}
+
 		default:
 			respErr = fmt.Errorf("Unknown request type: %s", req.Type)
 		}
